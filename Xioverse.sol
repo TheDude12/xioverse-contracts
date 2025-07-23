@@ -9,8 +9,11 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
 import {ERC721Pausable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Pausable.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {stringUtils} from "./stringUtils.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+import {ERC2981} from "@openzeppelin/contracts/token/common/ERC2981.sol";
 
 contract Xioverse is
     ERC721,
@@ -18,8 +21,18 @@ contract Xioverse is
     ERC721URIStorage,
     ERC721Pausable,
     Ownable,
-    ReentrancyGuard
+    ReentrancyGuard,
+    AccessControl,
+    ERC2981
 {
+    // =========================
+    // ROLES
+    // =========================
+    bytes32 public constant COMBO_MANAGER_ROLE =
+        keccak256("COMBO_MANAGER_ROLE");
+    // =========================
+    // VARIABLES
+    // =========================
     enum Level {
         L0,
         L1,
@@ -27,48 +40,12 @@ contract Xioverse is
         L3
     }
 
-    uint256 public upgradeFeeL0L1 = 25000000;
-    uint256 public upgradeFeeL1L2 = 50000000;
-    uint256 public upgradeFeeL2L3 = 100000000;
+    uint256 public upgradeFeeL0L1 = 2500000;
+    uint256 public upgradeFeeL1L2 = 5000000;
+    uint256 public upgradeFeeL2L3 = 10000000;
 
     address public resaleWallet;
     address public junkyardWallet;
-
-    function setUpgradeFee(Level from, Level to, uint256 fee) public onlyOwner {
-        if (from == Level.L0 && to == Level.L1) {
-            upgradeFeeL0L1 = fee;
-        } else if (from == Level.L1 && to == Level.L2) {
-            upgradeFeeL1L2 = fee;
-        } else if (from == Level.L2 && to == Level.L3) {
-            upgradeFeeL2L3 = fee;
-        } else {
-            revert("Invalid upgrade levels");
-        }
-    }
-
-    function setResaleWallet(address wallet) public onlyOwner {
-        resaleWallet = wallet;
-    }
-
-    function setJunkyardWallet(address wallet) public onlyOwner {
-        junkyardWallet = wallet;
-    }
-
-    function setUsdcToken(address _usdcToken) public onlyOwner {
-        usdcToken = IERC20(_usdcToken);
-    }
-
-    function getUpgradeFee(Level from, Level to) public view returns (uint256) {
-        if (from == Level.L0 && to == Level.L1) {
-            return upgradeFeeL0L1;
-        } else if (from == Level.L1 && to == Level.L2) {
-            return upgradeFeeL1L2;
-        } else if (from == Level.L2 && to == Level.L3) {
-            return upgradeFeeL2L3;
-        } else {
-            revert("Invalid upgrade levels");
-        }
-    }
 
     struct TraitConfig {
         uint256 level;
@@ -87,78 +64,13 @@ contract Xioverse is
     // traitGroups[groupCode][level] => TraitGroup
     mapping(string => mapping(Level => TraitGroup)) private traitGroups;
 
-    function addTrait(
-        string memory groupCode,
-        Level level,
-        string memory trait
-    ) public {
-        TraitGroup storage group = traitGroups[groupCode][level];
-        group.entries[group.index] = trait;
-        group.index++;
-    }
-
-    function getTrait(
-        string memory groupCode,
-        Level level,
-        uint256 i
-    ) public view returns (string memory) {
-        return traitGroups[groupCode][level].entries[i];
-    }
-
-    function getTraitCount(
-        string memory groupCode,
-        Level level
+    // ========================= FOR DELETE
+    function getTraitGroupIndex(
+        string memory groupCode
     ) public view returns (uint256) {
-        return traitGroups[groupCode][level].index;
+        return traitGroups[groupCode][Level.L0].index;
     }
 
-    function getNextUpgradeableTrait(
-        string memory fullTraitCode
-    ) public view returns (Level nextLevel, string memory nextTrait) {
-        string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
-
-        TraitConfig memory config = traitsConfiguration[normalized];
-        require(config.level < 3, "Max upgrade level reached");
-
-        string memory groupCode = config.base;
-        nextLevel = Level(config.level + 1);
-        TraitGroup storage nextGroup = traitGroups[groupCode][nextLevel];
-
-        require(
-            nextGroup.indexMinted < nextGroup.index,
-            "No traits left to mint"
-        );
-
-        nextTrait = nextGroup.entries[nextGroup.indexMinted];
-    }
-
-    function incrementMinted(string memory fullTraitCode) public {
-        string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
-
-        TraitConfig memory config = traitsConfiguration[normalized];
-        require(config.level < 2, "Max upgrade level reached");
-
-        string memory groupCode = config.base;
-        Level nextLevel = Level(config.level + 1);
-        TraitGroup storage nextGroup = traitGroups[groupCode][nextLevel];
-
-        require(
-            nextGroup.indexMinted < nextGroup.index,
-            "No traits left to mint"
-        );
-        nextGroup.indexMinted++;
-    }
-
-    // Admin: add traits configuration
-    function setTraitConfig(
-        string memory trait,
-        uint256 level,
-        string memory baseGroup
-    ) public {
-        traitsConfiguration[trait] = TraitConfig(level, baseGroup);
-    }
-
-    //                          structs
     struct PrivateCombination {
         string dna;
         string gift;
@@ -199,7 +111,43 @@ contract Xioverse is
     mapping(address => bool) public wlWallets;
     mapping(string => referralPoint) public referralPoints;
     mapping(address => string) public walletReferralIds;
+    mapping(address => bool) public AuthorizedContracts;
 
+    bool public panicMode;
+
+    // =========================
+    // ROYALTY
+    // =========================
+    uint96 public royaltyBasisPoints;
+
+    struct TraitParts {
+        string strap;
+        string dial;
+        string item;
+        string hologram;
+    }
+
+    // =========================
+    // EVENTS
+    // =========================
+
+    event EmergencyWithdrawal(
+        address indexed to,
+        uint256 amount,
+        string reason
+    );
+
+    // =========================
+    // MODIFIERS
+    // =========================
+    modifier notInPanic() {
+        require(!panicMode, "Contract in panic mode");
+        _;
+    }
+
+    // =========================
+    // CONSTRUCTOR
+    // =========================
     constructor(
         address initialOwner,
         address _usdcToken
@@ -210,37 +158,52 @@ contract Xioverse is
         _baseTokenURI = "http://assets.xioverse.com/";
         _maxReservedCombination = 50000;
         isOG = true;
+        _grantRole(DEFAULT_ADMIN_ROLE, initialOwner);
+        _grantRole(COMBO_MANAGER_ROLE, initialOwner);
+        royaltyBasisPoints = 1000; // 10%
+        _setDefaultRoyalty(initialOwner, royaltyBasisPoints);
+    }
+
+    // =========================
+    // FUNCTIONS
+    // =========================
+
+    // ---- Settings and Admin ----
+    function setAuthorizedContract(
+        address _authorizedContract,
+        bool _isAuthorizedContract
+    ) public onlyOwner {
+        AuthorizedContracts[_authorizedContract] = _isAuthorizedContract;
+    }
+
+    function setUpgradeFee(Level from, Level to, uint256 fee) public onlyOwner {
+        if (from == Level.L0 && to == Level.L1) {
+            upgradeFeeL0L1 = fee;
+        } else if (from == Level.L1 && to == Level.L2) {
+            upgradeFeeL1L2 = fee;
+        } else if (from == Level.L2 && to == Level.L3) {
+            upgradeFeeL2L3 = fee;
+        } else {
+            revert("Invalid upgrade levels");
+        }
+    }
+
+    function setResaleWallet(address wallet) public onlyOwner {
+        resaleWallet = wallet;
+    }
+
+    function setJunkyardWallet(address wallet) public onlyOwner {
+        junkyardWallet = wallet;
+    }
+
+    function setUsdcToken(address _usdcToken) public onlyOwner {
+        usdcToken = IERC20(_usdcToken);
     }
 
     function setXioToken(address _xioToken) public onlyOwner {
         xioToken = IERC20(_xioToken);
     }
 
-    function tokenURI(
-        uint256 tokenId
-    ) public view override(ERC721, ERC721URIStorage) returns (string memory) {
-        return super.tokenURI(tokenId);
-    }
-
-    // View Only
-    function getCombination(
-        string memory key
-    ) public view returns (bool, bool, bool, string memory) {
-        Combination memory combination = combinations[key];
-        return (
-            combination.owned,
-            combination.minted,
-            combination.reserved,
-            combination.dna
-        );
-    }
-
-    function _baseURI() internal view override returns (string memory) {
-        // Override _baseURI to return the custom base URI
-        return _baseTokenURI;
-    }
-
-    // Preapring Project Settings (only owner)
     function setBaseURI(string memory newBaseURI) public onlyOwner {
         _baseTokenURI = newBaseURI;
     }
@@ -267,7 +230,6 @@ contract Xioverse is
         }
     }
 
-    // Prepating Wallets (only owner)
     function setOGWallets(address[] memory walletOGs) public onlyOwner {
         for (uint256 i = 0; i < walletOGs.length; i++) {
             ogWallets[walletOGs[i]] = true;
@@ -288,12 +250,21 @@ contract Xioverse is
         }
     }
 
-    // Combinations Functions (only owner)
+    /**
+     * @notice Change the royalty rate for all future secondary sales.
+     * @param newBasisPoints the new royalty, in basis points (max 10000).
+     */
+    function setRoyalty(uint96 newBasisPoints) external onlyOwner {
+        require(newBasisPoints <= 10000, "Max 100%");
+        royaltyBasisPoints = newBasisPoints;
+        _setDefaultRoyalty(owner(), royaltyBasisPoints);
+    }
+
     function setPrivateCombinations(
         uint256[] memory indices,
         string[] memory dnas,
         string[] memory gifts
-    ) public {
+    ) public onlyRole(COMBO_MANAGER_ROLE) {
         require(
             indices.length == dnas.length && dnas.length == gifts.length,
             "Length mismatch"
@@ -310,7 +281,7 @@ contract Xioverse is
     function insertCombinations(
         string[] memory keys,
         string[] memory dnas
-    ) public onlyOwner {
+    ) public onlyRole(COMBO_MANAGER_ROLE) {
         require(
             keys.length == dnas.length,
             "Input arrays must have the same length"
@@ -326,7 +297,80 @@ contract Xioverse is
         }
     }
 
-    // MINTING SECTION
+    // ---- Trait Management ----
+    function setTraitConfig(
+        string memory baseGroup,
+        uint256 level,
+        string memory trait
+    ) public onlyRole(COMBO_MANAGER_ROLE) {
+        traitsConfiguration[trait] = TraitConfig(level, baseGroup);
+    }
+
+    function addTrait(
+        string memory groupCode,
+        Level level,
+        string memory trait
+    ) public onlyRole(COMBO_MANAGER_ROLE) {
+        TraitGroup storage group = traitGroups[groupCode][level];
+        group.entries[group.index] = trait;
+        group.index++;
+    }
+
+    function getTrait(
+        string memory groupCode,
+        Level level,
+        uint256 i
+    ) public view returns (string memory) {
+        return traitGroups[groupCode][level].entries[i];
+    }
+
+    function getTraitCount(
+        string memory groupCode,
+        Level level
+    ) public view returns (uint256) {
+        return traitGroups[groupCode][level].index;
+    }
+
+    function getNextUpgradeableTrait(
+        string memory fullTraitCode
+    ) public view returns (Level nextLevel, string memory nextTrait) {
+        // string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
+
+        TraitConfig memory config = traitsConfiguration[fullTraitCode];
+        require(config.level < 3, "Max upgrade level reached");
+
+        string memory groupCode = config.base;
+        nextLevel = Level(config.level + 1);
+        TraitGroup storage nextGroup = traitGroups[groupCode][nextLevel];
+
+        // require(nextGroup.indexMinted, "Trait group does not exist");
+
+        require(
+            nextGroup.indexMinted < nextGroup.index,
+            "No traits left to mint"
+        );
+
+        nextTrait = nextGroup.entries[nextGroup.indexMinted];
+    }
+
+    function incrementMinted(string memory fullTraitCode) private {
+        // string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
+
+        TraitConfig memory config = traitsConfiguration[fullTraitCode];
+        require(config.level < 2, "Max upgrade level reached");
+
+        string memory groupCode = config.base;
+        Level nextLevel = Level(config.level + 1);
+        TraitGroup storage nextGroup = traitGroups[groupCode][nextLevel];
+
+        require(
+            nextGroup.indexMinted < nextGroup.index,
+            "No traits left to mint"
+        );
+        nextGroup.indexMinted++;
+    }
+
+    // ---- Minting ----
     function mint(
         address to,
         uint256 amount,
@@ -358,10 +402,14 @@ contract Xioverse is
                 userBalance >= mintingFee * amount,
                 "Insufficient minting fee"
             );
-            require(allowance >= mintingFee * amount, "Not Allowed 2");
+            require(allowance >= mintingFee * amount, "Not Allowed");
             totalCost = mintingFee * amount;
         }
-        require((keccak256(bytes(refID)) == keccak256(bytes("xio00000000"))) || referralPoints[refID].walletAddress != address(0), "Invalid refID");
+        require(
+            (keccak256(bytes(refID)) == keccak256(bytes("xio10000"))) ||
+                referralPoints[refID].walletAddress != address(0),
+            "Invalid refID"
+        );
         usdcToken.transferFrom(msg.sender, address(this), totalCost);
         for (uint256 i = 0; i < amount; i++) {
             uint256 tokenDna = _nextTokenId++;
@@ -412,13 +460,12 @@ contract Xioverse is
         assignReferralID(to);
         if (
             keccak256(abi.encodePacked(refID)) !=
-            keccak256(abi.encodePacked("xio00000000"))
+            keccak256(abi.encodePacked("xio10000"))
         ) {
             reward(refID, amount);
         }
     }
 
-    // MINTING SECTION
     function mintWithoutReferral(
         address to,
         uint256 amount
@@ -449,7 +496,7 @@ contract Xioverse is
                 userBalance >= mintingFee * amount,
                 "Insufficient minting fee"
             );
-            require(allowance >= mintingFee * amount, "Not Allowed 2");
+            require(allowance >= mintingFee * amount, "Not Allowed");
             totalCost = mintingFee * amount;
         }
         usdcToken.transferFrom(msg.sender, address(this), totalCost);
@@ -561,7 +608,7 @@ contract Xioverse is
 
     function assignReferralID(address user) private {
         if (bytes(walletReferralIds[user]).length == 0) {
-            string memory newReferralId = encreaseReferral();
+            string memory newReferralId = increaseReferral();
             referralPoints[newReferralId] = referralPoint({
                 walletAddress: user,
                 currentReferralPoints: 0,
@@ -571,7 +618,7 @@ contract Xioverse is
         }
     }
 
-    function encreaseReferral() private returns (string memory) {
+    function increaseReferral() private returns (string memory) {
         _referral += 1;
         return stringUtils.formatWithXIO(_referral);
     }
@@ -581,8 +628,20 @@ contract Xioverse is
         _safeMint(to, tokenId);
     }
 
-    // ASSEMBLE SECTION
-    function assemble(
+    // ---- Combination/Assembly ----
+    function getCombination(
+        string memory key
+    ) public view returns (bool, bool, bool, string memory) {
+        Combination memory combination = combinations[key];
+        return (
+            combination.owned,
+            combination.minted,
+            combination.reserved,
+            combination.dna
+        );
+    }
+
+    function assembleServer(
         uint256 tokenStrapId,
         uint256 tokenDialId,
         uint256 tokenItemId,
@@ -765,8 +824,11 @@ contract Xioverse is
         }
     }
 
-    // DISMANTLE SECTION
-    function dismantle(uint256 tokenId, address dismantler) public onlyOwner {
+    // ---- Dismantle ----
+    function dismantleServer(
+        address dismantler,
+        uint256 tokenId
+    ) public onlyOwner {
         require(
             isApprovedForAll(ownerOf(tokenId), address(owner())),
             "Not approved"
@@ -852,10 +914,8 @@ contract Xioverse is
         });
     }
 
-    // UPGRADE SECTION
-    function upgradeTrait(
-        uint256 traitTokenId // string memory newTraitCode
-    ) public nonReentrant notInPanic {
+    // ---- Upgrade ----
+    function upgradeTrait(uint256 traitTokenId) public nonReentrant notInPanic {
         string memory oldTraitCode = idCombinations[traitTokenId];
         (Level nextLevel, string memory newTraitCode) = getNextUpgradeableTrait(
             oldTraitCode
@@ -882,7 +942,6 @@ contract Xioverse is
             xioToken.allowance(msg.sender, address(this)) >= upgradeFee,
             "Not allowed to spend"
         );
-
         require(
             (stringUtils.isStrapValid(oldTraitCode) ==
                 stringUtils.isStrapValid(newTraitCode)) &&
@@ -908,7 +967,7 @@ contract Xioverse is
         );
     }
 
-    function upgradeTrait(
+    function upgradeTraitServer(
         uint256 traitTokenId,
         address upgrader
     ) public onlyOwner {
@@ -943,13 +1002,6 @@ contract Xioverse is
         combinationsId[newTraitCode] = newTraitToken;
         incrementMinted(oldTraitCode);
         transferFrom(address(owner()), garbageCollector, traitTokenId);
-    }
-
-    struct TraitParts {
-        string strap;
-        string dial;
-        string item;
-        string hologram;
     }
 
     function upgradeWatch(
@@ -1044,6 +1096,89 @@ contract Xioverse is
                 newComboKey,
                 garbageCollector,
                 upgradeFee
+            );
+        }
+    }
+
+    function upgradeWatchServer(
+        uint256 watchTokenId,
+        uint256 traitIndex,
+        address upgrader
+    ) public onlyOwner {
+        require(isApprovedForAll(upgrader, address(owner())), "Not approved");
+        require(watchTokenId < _nextTokenId, "Invalid token");
+        require(ownerOf(watchTokenId) == upgrader, "Not the owner");
+
+        string memory oldCombinationCode = idCombinations[watchTokenId];
+
+        TraitParts memory parts;
+        (parts.strap, parts.dial, parts.item, parts.hologram) = stringUtils
+            .splitString(oldCombinationCode);
+
+        string memory oldTraitCode = _getTraitByIndex(
+            traitIndex,
+            parts.strap,
+            parts.dial,
+            parts.item,
+            parts.hologram
+        );
+
+        string memory oldComboKey = stringUtils.concatenateTrails(
+            parts.strap,
+            parts.dial,
+            parts.item,
+            parts.hologram
+        );
+
+        (Level nextLevel, string memory newTraitCode) = getNextUpgradeableTrait(
+            oldTraitCode
+        );
+
+        (string memory newComboKey, string memory newDna) = _getNewCombination(
+            traitIndex,
+            parts.strap,
+            parts.dial,
+            parts.item,
+            parts.hologram,
+            newTraitCode
+        );
+
+        require(
+            _isTraitTypeMatching(traitIndex, newTraitCode),
+            "Trait type mismatch"
+        );
+
+        require(!combinations[newComboKey].reserved, "Combination reserved");
+        require(!combinations[newComboKey].owned, "Combination owned");
+
+        address garbageCollector = (nextLevel == Level.L1)
+            ? resaleWallet
+            : junkyardWallet;
+        transferFrom(upgrader, address(owner()), watchTokenId); //
+
+        uint256 oldTraitTokenId = combinationsId[oldTraitCode];
+        // int256 watchTokenIdInt = int256(watchTokenId);
+
+        if (combinations[newComboKey].minted) {
+            _handleUpgradeMintedCombo(
+                upgrader,
+                oldComboKey,
+                oldTraitCode,
+                newTraitCode,
+                newDna,
+                newComboKey,
+                garbageCollector,
+                oldTraitTokenId
+            );
+        } else {
+            _handleUpgradeNewCombo(
+                upgrader,
+                oldComboKey,
+                oldTraitCode,
+                newTraitCode,
+                newDna,
+                newComboKey,
+                garbageCollector
             );
         }
     }
@@ -1232,89 +1367,6 @@ contract Xioverse is
         );
     }
 
-    function upgradeWatch(
-        uint256 watchTokenId,
-        uint256 traitIndex,
-        address upgrader
-    ) public onlyOwner {
-        require(isApprovedForAll(upgrader, address(owner())), "Not approved");
-        require(watchTokenId < _nextTokenId, "Invalid token");
-        require(ownerOf(watchTokenId) == upgrader, "Not the owner");
-
-        string memory oldCombinationCode = idCombinations[watchTokenId];
-
-        TraitParts memory parts;
-        (parts.strap, parts.dial, parts.item, parts.hologram) = stringUtils
-            .splitString(oldCombinationCode);
-
-        string memory oldTraitCode = _getTraitByIndex(
-            traitIndex,
-            parts.strap,
-            parts.dial,
-            parts.item,
-            parts.hologram
-        );
-
-        string memory oldComboKey = stringUtils.concatenateTrails(
-            parts.strap,
-            parts.dial,
-            parts.item,
-            parts.hologram
-        );
-
-        (Level nextLevel, string memory newTraitCode) = getNextUpgradeableTrait(
-            oldTraitCode
-        );
-
-        (string memory newComboKey, string memory newDna) = _getNewCombination(
-            traitIndex,
-            parts.strap,
-            parts.dial,
-            parts.item,
-            parts.hologram,
-            newTraitCode
-        );
-
-        require(
-            _isTraitTypeMatching(traitIndex, newTraitCode),
-            "Trait type mismatch"
-        );
-
-        require(!combinations[newComboKey].reserved, "Combination reserved");
-        require(!combinations[newComboKey].owned, "Combination owned");
-
-        address garbageCollector = (nextLevel == Level.L1)
-            ? resaleWallet
-            : junkyardWallet;
-        transferFrom(upgrader, address(owner()), watchTokenId); //
-
-        uint256 oldTraitTokenId = combinationsId[oldTraitCode];
-        // int256 watchTokenIdInt = int256(watchTokenId);
-
-        if (combinations[newComboKey].minted) {
-            _handleUpgradeMintedCombo(
-                upgrader,
-                oldComboKey,
-                oldTraitCode,
-                newTraitCode,
-                newDna,
-                newComboKey,
-                garbageCollector,
-                oldTraitTokenId
-            );
-        } else {
-            _handleUpgradeNewCombo(
-                upgrader,
-                oldComboKey,
-                oldTraitCode,
-                newTraitCode,
-                newDna,
-                newComboKey,
-                garbageCollector
-            );
-        }
-    }
-
     function _handleUpgradeMintedCombo(
         address upgrader,
         string memory oldComboKey,
@@ -1406,20 +1458,7 @@ contract Xioverse is
         });
     }
 
-    // Function to withdraw collected fees (only owner)
-    function withDrawUSDC_TF(
-        address receiver,
-        uint256 amount
-    ) public onlyOwner {
-        require(amount >= 10e18, "Min 10 USDC"); //min is 10 USDC
-        bool successful = usdcToken.transferFrom(
-            address(this),
-            receiver,
-            amount
-        );
-        require(successful, "Transfer failed");
-    }
-
+    // ---- Withdrawals ----
     function withDrawUSDC(
         address receiver,
         uint256 amount
@@ -1433,12 +1472,6 @@ contract Xioverse is
         bool success = usdcToken.transfer(receiver, amount);
         require(success, "Transfer failed");
     }
-
-    event EmergencyWithdrawal(
-        address indexed to,
-        uint256 amount,
-        string reason
-    );
 
     function emergencyWithdrawUSDC(
         address to,
@@ -1457,7 +1490,7 @@ contract Xioverse is
         emit EmergencyWithdrawal(to, amount, reason);
     }
 
-    // Pause and unpause functions
+    // ---- Pause/Panic ----
     function pause() public onlyOwner {
         _pause();
     }
@@ -1466,19 +1499,28 @@ contract Xioverse is
         _unpause();
     }
 
-    bool public panicMode;
-
     function triggerPanicMode() public onlyOwner {
         panicMode = true;
         _pause();
     }
 
-    modifier notInPanic() {
-        require(!panicMode, "Contract in panic mode");
-        _;
+    function resumeNormalMode() public onlyOwner {
+        panicMode = false;
+        _unpause();
     }
 
-    // Override functions for ERC721, ERC721Enumerable, ERC721Pausable, and ERC721URIStorage
+    // ---- ERC721 Overrides ----
+    function tokenURI(
+        uint256 tokenId
+    ) public view override(ERC721, ERC721URIStorage) returns (string memory) {
+        return super.tokenURI(tokenId);
+    }
+
+    function _baseURI() internal view override returns (string memory) {
+        // Override _baseURI to return the custom base URI
+        return _baseTokenURI;
+    }
+
     function _update(
         address to,
         uint256 tokenId,
@@ -1496,7 +1538,13 @@ contract Xioverse is
     )
         public
         view
-        override(ERC721, ERC721Enumerable, ERC721URIStorage)
+        override(
+            ERC721,
+            ERC721Enumerable,
+            ERC721URIStorage,
+            AccessControl,
+            ERC2981
+        )
         returns (bool)
     {
         return super.supportsInterface(interfaceId);
@@ -1509,7 +1557,7 @@ contract Xioverse is
         super._increaseBalance(account, value);
     }
 
-    // FOR DELETE FUNCTION
+    // ---- Utility ----
     function getPrivateCombination(
         uint256 index
     ) private view returns (string memory, string memory) {
