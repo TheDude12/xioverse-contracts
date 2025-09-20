@@ -143,6 +143,16 @@ contract XioverseMarketplace is Ownable, ReentrancyGuard {
         emit NFTSold(tokenId, l.seller, to, l.price);
     }
 
+    function purgeStaleListing(uint256 tokenId) external {
+    Listing memory l = listings[tokenId];
+    require(l.seller != address(0), "No listing");
+    // If seller no longer owns the token, allow anyone to clear it
+    require(IERC721(nftContract).ownerOf(tokenId) != l.seller, "Listing still valid");
+    delete listings[tokenId];
+    emit NFTUnlisted(tokenId);
+    }
+
+
     // 🔹 Offers
 
     function makeOffer(uint256 tokenId, uint256 amount, uint256 expiration) external nonReentrant {
