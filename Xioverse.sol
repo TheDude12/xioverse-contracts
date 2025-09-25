@@ -28,8 +28,15 @@ contract Xioverse is
     // =========================
     // ROLES
     // =========================
-    bytes32 public constant COMBO_MANAGER_ROLE =
-        keccak256("COMBO_MANAGER_ROLE");
+
+    bytes32 public constant ComboManager_Role =
+        keccak256("ComboManager_Role");
+    
+    bytes32 public constant CustodyWallet_Role =
+        keccak256("CustodyWallet_ROLE");
+    
+    address public custodyWallet;
+    
     // =========================
     // VARIABLES
     // =========================
@@ -89,9 +96,10 @@ contract Xioverse is
     }
 
     uint256 private _nextTokenId;
-    uint256 public _mintedResered;
+    uint256 public _mintedReserved;
     uint256 public mintingFee;
     string private _baseTokenURI;
+    string private _uriExtension;
     uint256 public _maxReservedCombination;
     uint256 private _currentReservedCombination;
     uint256 private _referral;
@@ -136,7 +144,8 @@ contract Xioverse is
         uint256 amount,
         string reason
     );
-
+    event CustodyWalletChanged(address indexed oldWallet, address indexed newWallet);
+    event UpgradeCharged(address indexed payer, uint256 indexed fee, uint8 level);
     // =========================
     // MODIFIERS
     // =========================
@@ -154,12 +163,14 @@ contract Xioverse is
     ) ERC721("xioverse", "XIOVERSE") Ownable(initialOwner) {
         _pause();
         usdcToken = IERC20(_usdcToken);
-        mintingFee = 1000000;
+        mintingFee = 0;
         _baseTokenURI = "http://assets.xioverse.com/";
+        _uriExtension = ".json";
         _maxReservedCombination = 50000;
         isOG = true;
         _grantRole(DEFAULT_ADMIN_ROLE, initialOwner);
-        _grantRole(COMBO_MANAGER_ROLE, initialOwner);
+        _grantRole(ComboManager_Role, initialOwner);
+        _setCustodyWallet(initialOwner);
         royaltyBasisPoints = 1000; // 10%
         _setDefaultRoyalty(initialOwner, royaltyBasisPoints);
     }
@@ -169,6 +180,32 @@ contract Xioverse is
     // =========================
 
     // ---- Settings and Admin ----
+    function setCustodyWallet(address newWallet)
+    external
+    onlyOwner   // or onlyOwner if you prefer
+{
+    _setCustodyWallet(newWallet);
+}
+
+function _setCustodyWallet(address newWallet) internal {
+    require(newWallet != address(0), "custody wallet = zero");
+    address old = custodyWallet;
+
+    // If an old wallet exists, revoke role from it
+    if (old != address(0) && hasRole(CustodyWallet_Role, old)) {
+        super._revokeRole(CustodyWallet_Role, old); // call super to skip our override guard
+    }
+
+    custodyWallet = newWallet;
+
+    // Grant role to the new wallet
+    if (!hasRole(CustodyWallet_Role, newWallet)) {
+        super._grantRole(CustodyWallet_Role, newWallet); // call super to skip our override guard
+    }
+
+    emit CustodyWalletChanged(old, newWallet);
+}
+
     function setAuthorizedContract(
         address _authorizedContract,
         bool _isAuthorizedContract
@@ -208,11 +245,15 @@ contract Xioverse is
         _baseTokenURI = newBaseURI;
     }
 
+    function setUriExtension(string memory newExtension) public onlyOwner {
+    _uriExtension = newExtension;
+    }
+
     function setMintingFee(uint256 newFee) public onlyOwner {
         mintingFee = newFee;
     }
 
-    function changeSmartContractStatus(uint256 status) public onlyOwner {
+    function changeMintingPhase(uint256 status) public onlyOwner {
         if (status == 1) {
             isOG = true;
             isWL = false;
@@ -264,7 +305,7 @@ contract Xioverse is
         uint256[] memory indices,
         string[] memory dnas,
         string[] memory gifts
-    ) public onlyRole(COMBO_MANAGER_ROLE) {
+    ) public onlyRole(ComboManager_Role) {
         require(
             indices.length == dnas.length && dnas.length == gifts.length,
             "Length mismatch"
@@ -281,7 +322,7 @@ contract Xioverse is
     function insertCombinations(
         string[] memory keys,
         string[] memory dnas
-    ) public onlyRole(COMBO_MANAGER_ROLE) {
+    ) public onlyRole(ComboManager_Role) {
         require(
             keys.length == dnas.length,
             "Input arrays must have the same length"
@@ -302,19 +343,61 @@ contract Xioverse is
         string memory baseGroup,
         uint256 level,
         string memory trait
-    ) public onlyRole(COMBO_MANAGER_ROLE) {
+    ) public onlyRole(ComboManager_Role) {
         traitsConfiguration[trait] = TraitConfig(level, baseGroup);
+    }
+    
+    function setTraitConfig(
+        string[] memory baseGroups,
+        uint256[] memory levels,
+        string[] memory traits
+    ) public onlyRole(ComboManager_Role) {
+        uint256 len = traits.length;
+        require(
+            baseGroups.length == len && levels.length == len,
+            "Length mismatch"
+        );
+        for (uint256 i = 0; i < len; i++) {
+            traitsConfiguration[traits[i]] = TraitConfig(levels[i], baseGroups[i]);
+        }
     }
 
     function addTrait(
         string memory groupCode,
         Level level,
         string memory trait
-    ) public onlyRole(COMBO_MANAGER_ROLE) {
+    ) public onlyRole(ComboManager_Role) {
         TraitGroup storage group = traitGroups[groupCode][level];
         group.entries[group.index] = trait;
         group.index++;
     }
+    function setTraitAtIndex(
+        string memory groupCode,
+        Level level,
+        uint256 i,
+        string memory trait
+    ) external onlyRole(ComboManager_Role) {
+        require(i < traitGroups[groupCode][level].index, "Index OOB");
+        traitGroups[groupCode][level].entries[i] = trait;
+    }
+
+    function addTrait(
+            string[] memory groupCodes,
+            string[] memory traits,
+            uint256[] memory levels
+        ) public onlyRole(ComboManager_Role) {
+            uint256 len = traits.length;
+            require(len > 0, "No traits");
+            require(groupCodes.length == len && levels.length == len, "Length mismatch");
+            for (uint256 i = 0; i < len; i++) {
+                uint256 rawLevel = levels[i];
+                require(rawLevel < 4, "Invalid level");
+                TraitGroup storage group = traitGroups[groupCodes[i]][Level(rawLevel)];
+                group.entries[group.index] = traits[i];
+                group.index++;
+            }
+        }
+    
 
     function getTrait(
         string memory groupCode,
@@ -334,16 +417,16 @@ contract Xioverse is
     function getNextUpgradeableTrait(
         string memory fullTraitCode
     ) public view returns (Level nextLevel, string memory nextTrait) {
-        // string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
+        string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
 
-        TraitConfig memory config = traitsConfiguration[fullTraitCode];
+        TraitConfig memory config = traitsConfiguration[normalized];
         require(config.level < 3, "Max upgrade level reached");
 
         string memory groupCode = config.base;
         nextLevel = Level(config.level + 1);
         TraitGroup storage nextGroup = traitGroups[groupCode][nextLevel];
 
-        // require(nextGroup.indexMinted, "Trait group does not exist");
+        
 
         require(
             nextGroup.indexMinted < nextGroup.index,
@@ -354,10 +437,10 @@ contract Xioverse is
     }
 
     function incrementMinted(string memory fullTraitCode) private {
-        // string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
+        string memory normalized = stringUtils.normalizeTrait(fullTraitCode);
 
-        TraitConfig memory config = traitsConfiguration[fullTraitCode];
-        require(config.level < 2, "Max upgrade level reached");
+        TraitConfig memory config = traitsConfiguration[normalized];
+        require(config.level < 3, "Max upgrade level reached");
 
         string memory groupCode = config.base;
         Level nextLevel = Level(config.level + 1);
@@ -371,11 +454,12 @@ contract Xioverse is
     }
 
     // ---- Minting ----
-    function mint(
+    function _mintcore(
         address to,
         uint256 amount,
         string memory refID
-    ) public nonReentrant notInPanic {
+    ) internal {
+        require(amount > 0, "Amount must be > 0"); 
         uint256 userBalance = usdcToken.balanceOf(msg.sender);
         uint256 allowance = usdcToken.allowance(msg.sender, address(this));
         uint256 totalCost = 0;
@@ -387,7 +471,7 @@ contract Xioverse is
             "This wallet is not listed to mint in this stage"
         );
         require(
-            amount + _mintedResered < _maxReservedCombination,
+            amount + _mintedReserved <= _maxReservedCombination,
             "You have exceeded the Max Reserved Combination"
         );
         if (ogUnusedWallets[to] == true) {
@@ -419,18 +503,18 @@ contract Xioverse is
             uint256 tokenItem = _nextTokenId++;
             uint256 tokenHologram = _nextTokenId++;
             _safeMint(to, tokenDna);
-            _mintedResered += 1;
+            _mintedReserved += 1;
             _safeMint(to, tokenGift);
-            _safeMint(address(owner()), tokenStrap);
-            _safeMint(address(owner()), tokenDial);
-            _safeMint(address(owner()), tokenItem);
-            _safeMint(address(owner()), tokenHologram);
+            _safeMint(custodyWallet, tokenStrap);
+            _safeMint(custodyWallet, tokenDial);
+            _safeMint(custodyWallet, tokenItem);
+            _safeMint(custodyWallet, tokenHologram);
             uint256 index = _currentReservedCombination++;
             (string memory dna, string memory gift) = getPrivateCombination(
                 index
             );
             (
-                string memory compoKey,
+                string memory ComboKey,
                 string memory strap,
                 string memory dial,
                 string memory item,
@@ -448,7 +532,7 @@ contract Xioverse is
             combinationsId[dial] = _nextTokenId - 3;
             combinationsId[item] = _nextTokenId - 2;
             combinationsId[hologram] = _nextTokenId - 1;
-            combinations[compoKey] = Combination({
+            combinations[ComboKey] = Combination({
                 owned: true,
                 minted: true,
                 reserved: false,
@@ -466,87 +550,20 @@ contract Xioverse is
         }
     }
 
-    function mintWithoutReferral(
-        address to,
-        uint256 amount
-    ) public nonReentrant notInPanic {
-        uint256 userBalance = usdcToken.balanceOf(msg.sender);
-        uint256 allowance = usdcToken.allowance(msg.sender, address(this));
-        uint256 totalCost = 0;
-        require(
-            ((isPublic) ||
-                ((isOG) && (ogWallets[to] == true)) ||
-                ((isWL) &&
-                    ((wlWallets[to] == true) || (ogWallets[to] == true)))),
-            "This wallet is not listed to mint in this stage"
-        );
-        require(
-            amount + _mintedResered < _maxReservedCombination,
-            "You have exceeded the Max Reserved Combination"
-        );
-        if (ogUnusedWallets[to] == true) {
-            require(
-                userBalance >= mintingFee * (amount - 1),
-                "Insufficient minting fee"
-            );
-            require(allowance >= mintingFee * (amount - 1), "Not Allowed 1");
-            totalCost = mintingFee * (amount - 1);
-        } else {
-            require(
-                userBalance >= mintingFee * amount,
-                "Insufficient minting fee"
-            );
-            require(allowance >= mintingFee * amount, "Not Allowed");
-            totalCost = mintingFee * amount;
-        }
-        usdcToken.transferFrom(msg.sender, address(this), totalCost);
-        for (uint256 i = 0; i < amount; i++) {
-            uint256 tokenDna = _nextTokenId++;
-            uint256 tokenGift = _nextTokenId++;
-            uint256 tokenStrap = _nextTokenId++;
-            uint256 tokenDial = _nextTokenId++;
-            uint256 tokenItem = _nextTokenId++;
-            uint256 tokenHologram = _nextTokenId++;
-            _safeMint(to, tokenDna);
-            _mintedResered += 1;
-            _safeMint(to, tokenGift);
-            _safeMint(address(owner()), tokenStrap);
-            _safeMint(address(owner()), tokenDial);
-            _safeMint(address(owner()), tokenItem);
-            _safeMint(address(owner()), tokenHologram);
-            uint256 index = _currentReservedCombination++;
-            (string memory dna, string memory gift) = getPrivateCombination(
-                index
-            );
-            (
-                string memory compoKey,
-                string memory strap,
-                string memory dial,
-                string memory item,
-                string memory hologram
-            ) = stringUtils.processString(dna);
-            idCombinations[(_nextTokenId - 6)] = dna;
-            idCombinations[(_nextTokenId - 5)] = gift;
-            idCombinations[(_nextTokenId - 4)] = strap;
-            idCombinations[(_nextTokenId - 3)] = dial;
-            idCombinations[(_nextTokenId - 2)] = item;
-            idCombinations[(_nextTokenId - 1)] = hologram;
-            combinationsId[dna] = _nextTokenId - 6;
-            combinationsId[gift] = _nextTokenId - 5;
-            combinationsId[strap] = _nextTokenId - 4;
-            combinationsId[dial] = _nextTokenId - 3;
-            combinationsId[item] = _nextTokenId - 2;
-            combinationsId[hologram] = _nextTokenId - 1;
-            combinations[compoKey] = Combination({
-                owned: true,
-                minted: true,
-                reserved: false,
-                dna: dna,
-                id: int256(_nextTokenId) - 6
-            });
-        }
-        ogUnusedWallets[to] = false;
-        assignReferralID(to);
+    function mint(address to, uint256 amount, string memory refID)
+        public
+        nonReentrant
+        notInPanic
+    {
+        _mintcore(to, amount, refID);
+    }
+
+    function mintWithoutReferral(address to, uint256 amount)
+        public
+        nonReentrant
+        notInPanic
+    {
+        _mintcore(to, amount, "xio10000");
     }
 
     function reward(string memory refID, uint256 points) internal {
@@ -554,7 +571,7 @@ contract Xioverse is
             referralPoints[refID].currentReferralPoints += 1;
             referralPoints[refID].overAllReferralPoints += 1;
             if (referralPoints[refID].currentReferralPoints >= 4) {
-                if (1 + _mintedResered < _maxReservedCombination) {
+                if (1 + _mintedReserved <= _maxReservedCombination) {
                     internalMint(referralPoints[refID].walletAddress);
                     referralPoints[refID].currentReferralPoints -= 4;
                 }
@@ -570,16 +587,16 @@ contract Xioverse is
         uint256 tokenItem = _nextTokenId++;
         uint256 tokenHologram = _nextTokenId++;
         _safeMint(to, tokenDna);
-        _mintedResered += 1;
+        _mintedReserved += 1;
         _safeMint(to, tokenGift);
-        _safeMint(address(owner()), tokenStrap);
-        _safeMint(address(owner()), tokenDial);
-        _safeMint(address(owner()), tokenItem);
-        _safeMint(address(owner()), tokenHologram);
+        _safeMint(custodyWallet, tokenStrap);
+        _safeMint(custodyWallet, tokenDial);
+        _safeMint(custodyWallet, tokenItem);
+        _safeMint(custodyWallet, tokenHologram);
         uint256 index = _currentReservedCombination++;
         (string memory dna, string memory gift) = getPrivateCombination(index);
         (
-            string memory compoKey,
+            string memory ComboKey,
             string memory strap,
             string memory dial,
             string memory item,
@@ -597,7 +614,7 @@ contract Xioverse is
         combinationsId[dial] = _nextTokenId - 3;
         combinationsId[item] = _nextTokenId - 2;
         combinationsId[hologram] = _nextTokenId - 1;
-        combinations[compoKey] = Combination({
+        combinations[ComboKey] = Combination({
             owned: true,
             minted: true,
             reserved: false,
@@ -623,12 +640,28 @@ contract Xioverse is
         return stringUtils.formatWithXIO(_referral);
     }
 
-    function safeMint(address to) public onlyOwner {
-        uint256 tokenId = _nextTokenId++;
-        _safeMint(to, tokenId);
+    function Airdrop(address to, uint256 amount)
+        public
+        onlyOwner
+        nonReentrant
+        notInPanic
+    {
+        require(
+            amount + _mintedReserved <= _maxReservedCombination,
+            "You have exceeded the Max Reserved Combination"
+        );
+
+        for (uint256 i = 0; i < amount; i++) {
+            internalMint(to);
+        }
     }
 
+
     // ---- Combination/Assembly ----
+    function _contractTransfer(address from, address to, uint256 tokenId) internal {
+    IERC721(address(this)).safeTransferFrom(from, to, tokenId);
+}
+
     function getCombination(
         string memory key
     ) public view returns (bool, bool, bool, string memory) {
@@ -647,13 +680,13 @@ contract Xioverse is
         uint256 tokenItemId,
         uint256 tokenHologramId,
         address assembler
-    ) public onlyOwner {
+    ) public nonReentrant onlyRole(CustodyWallet_Role) {
         require(
-            isApprovedForAll(assembler, address(owner())) || // Check if caller is an operator
-                (getApproved(tokenStrapId) == address(owner()) &&
-                    getApproved(tokenDialId) == address(owner()) &&
-                    getApproved(tokenItemId) == address(owner()) &&
-                    getApproved(tokenHologramId) == address(owner())), // OR if NFT is approved to this contract
+            isApprovedForAll(assembler, address(this)) || // Check if caller is an operator
+                (getApproved(tokenStrapId) == address(this) &&
+                    getApproved(tokenDialId) == address(this) &&
+                    getApproved(tokenItemId) == address(this) &&
+                    getApproved(tokenHologramId) == address(this)), // OR if NFT is approved to this contract
             "Not approved"
         );
 
@@ -677,23 +710,23 @@ contract Xioverse is
         require(stringUtils.isItemValid(item), "Invalid Item");
         require(stringUtils.isHologramValid(hologram), "Invalid Hologram");
 
-        string memory compoKey = stringUtils.concatenateTrails(
+        string memory ComboKey = stringUtils.concatenateTrails(
             strap,
             dial,
             item,
             hologram
         );
-        require(!combinations[compoKey].reserved, "reserved");
-        require(!combinations[compoKey].owned, "owned");
+        require(!combinations[ComboKey].reserved, "reserved");
+        require(!combinations[ComboKey].owned, "owned");
 
-        // Transfer the components to the contract owner
-        transferFrom(assembler, address(owner()), tokenStrapId);
-        transferFrom(assembler, address(owner()), tokenDialId);
-        transferFrom(assembler, address(owner()), tokenItemId);
-        transferFrom(assembler, address(owner()), tokenHologramId);
+        // Transfer the components to the custody wallet
+        _contractTransfer(assembler, custodyWallet, tokenStrapId);
+        _contractTransfer(assembler, custodyWallet, tokenDialId);
+        _contractTransfer(assembler, custodyWallet, tokenItemId);
+        _contractTransfer(assembler, custodyWallet, tokenHologramId);
 
-        if (combinations[compoKey].minted == true) {
-            string memory old_dna = combinations[compoKey].dna;
+        if (combinations[ComboKey].minted == true) {
+            string memory old_dna = combinations[ComboKey].dna;
             string memory new_dna = stringUtils.generateFullDNA(
                 strap,
                 dial,
@@ -701,8 +734,8 @@ contract Xioverse is
                 hologram
             );
             uint256 comboTokenID = combinationsId[old_dna];
-            transferFrom(address(owner()), assembler, comboTokenID);
-            combinations[compoKey] = Combination({
+            transferFrom(custodyWallet, assembler, comboTokenID);
+            combinations[ComboKey] = Combination({
                 owned: true,
                 minted: true,
                 reserved: false,
@@ -723,7 +756,7 @@ contract Xioverse is
             _safeMint(assembler, tokenDna);
             idCombinations[tokenDna] = dna;
             combinationsId[dna] = tokenDna;
-            combinations[compoKey] = Combination({
+            combinations[ComboKey] = Combination({
                 owned: true,
                 minted: true,
                 reserved: false,
@@ -740,19 +773,19 @@ contract Xioverse is
         uint256 tokenHologramId
     ) public nonReentrant notInPanic {
         require(
-            isApprovedForAll(owner(), address(this)),
-            "Contract not approved to transfer owner's token"
+            isApprovedForAll(custodyWallet, address(this)),
+            "Contract not approved to transfer project's token"
         );
 
-        require(tokenStrapId < _nextTokenId, "Invalid token");
-        require(tokenDialId < _nextTokenId, "Invalid token");
-        require(tokenItemId < _nextTokenId, "Invalid token");
-        require(tokenHologramId < _nextTokenId, "Invalid token");
+        require(tokenStrapId < _nextTokenId, "Invalid Strap token");
+        require(tokenDialId < _nextTokenId, "Invalid Dial token");
+        require(tokenItemId < _nextTokenId, "Invalid Item token");
+        require(tokenHologramId < _nextTokenId, "Invalid Hologram token");
 
-        require(ownerOf(tokenStrapId) == msg.sender, "Not owned");
-        require(ownerOf(tokenDialId) == msg.sender, "not owned");
-        require(ownerOf(tokenItemId) == msg.sender, "not owned");
-        require(ownerOf(tokenHologramId) == msg.sender, "not owned");
+        require(ownerOf(tokenStrapId) == msg.sender, "Strap not owned by user");
+        require(ownerOf(tokenDialId) == msg.sender, "Dial not owned by user");
+        require(ownerOf(tokenItemId) == msg.sender, "Item not owned by user");
+        require(ownerOf(tokenHologramId) == msg.sender, "Hologram not owned by user");
 
         string memory strap = idCombinations[tokenStrapId];
         string memory dial = idCombinations[tokenDialId];
@@ -764,23 +797,23 @@ contract Xioverse is
         require(stringUtils.isItemValid(item), "Invalid Item");
         require(stringUtils.isHologramValid(hologram), "Invalid Hologram");
 
-        string memory compoKey = stringUtils.concatenateTrails(
+        string memory ComboKey = stringUtils.concatenateTrails(
             strap,
             dial,
             item,
             hologram
         );
-        require(!combinations[compoKey].reserved, "reserved");
-        require(!combinations[compoKey].owned, "owned");
+        require(!combinations[ComboKey].reserved, "reserved");
+        require(!combinations[ComboKey].owned, "owned");
 
         // Transfer the components to the contract owner
-        transferFrom(msg.sender, address(owner()), tokenStrapId);
-        transferFrom(msg.sender, address(owner()), tokenDialId);
-        transferFrom(msg.sender, address(owner()), tokenItemId);
-        transferFrom(msg.sender, address(owner()), tokenHologramId);
+        transferFrom(msg.sender, custodyWallet, tokenStrapId);
+        transferFrom(msg.sender, custodyWallet, tokenDialId);
+        transferFrom(msg.sender, custodyWallet, tokenItemId);
+        transferFrom(msg.sender, custodyWallet, tokenHologramId);
 
-        if (combinations[compoKey].minted == true) {
-            string memory old_dna = combinations[compoKey].dna;
+        if (combinations[ComboKey].minted == true) {
+            string memory old_dna = combinations[ComboKey].dna;
             string memory new_dna = stringUtils.generateFullDNA(
                 strap,
                 dial,
@@ -788,12 +821,8 @@ contract Xioverse is
                 hologram
             );
             uint256 comboTokenID = combinationsId[old_dna];
-            IERC721(address(this)).safeTransferFrom(
-                owner(),
-                msg.sender,
-                comboTokenID
-            );
-            combinations[compoKey] = Combination({
+            _contractTransfer(custodyWallet, msg.sender, comboTokenID);
+            combinations[ComboKey] = Combination({
                 owned: true,
                 minted: true,
                 reserved: false,
@@ -814,7 +843,7 @@ contract Xioverse is
             _safeMint(msg.sender, tokenDna);
             idCombinations[tokenDna] = dna;
             combinationsId[dna] = tokenDna;
-            combinations[compoKey] = Combination({
+            combinations[ComboKey] = Combination({
                 owned: true,
                 minted: true,
                 reserved: false,
@@ -828,39 +857,40 @@ contract Xioverse is
     function dismantleServer(
         address dismantler,
         uint256 tokenId
-    ) public onlyOwner {
+    ) public nonReentrant onlyRole(CustodyWallet_Role) {
         require(
-            isApprovedForAll(ownerOf(tokenId), address(owner())),
+            isApprovedForAll(ownerOf(tokenId), address(this)),
             "Not approved"
         );
 
         require(tokenId < _nextTokenId, "Invalid token");
-        require(ownerOf(tokenId) == dismantler, "not the owner");
+        require(ownerOf(tokenId) == dismantler, "User is not the watch owner");
+
         string memory dnaResult = idCombinations[tokenId];
         bool isADnaValid = stringUtils.isDnaValid(dnaResult);
         require(isADnaValid, "This is a not a valid DNA");
         (
-            string memory compoKey,
+            string memory ComboKey,
             string memory strap,
             string memory dial,
             string memory item,
             string memory hologram
         ) = stringUtils.processString(dnaResult);
-        require(combinations[compoKey].owned == true, "Combination not owned");
+        require(combinations[ComboKey].owned == true, "Combination not owned");
         uint256 strapID = combinationsId[strap];
         uint256 dialID = combinationsId[dial];
         uint256 itemID = combinationsId[item];
         uint256 hologramID = combinationsId[hologram];
-        require(ownerOf(strapID) == address(msg.sender), "not owned");
-        require(ownerOf(dialID) == address(msg.sender), "not owned");
-        require(ownerOf(itemID) == address(msg.sender), "not owned");
-        require(ownerOf(hologramID) == address(msg.sender), "not owned");
-        transferFrom(dismantler, address(owner()), tokenId);
-        transferFrom(msg.sender, dismantler, strapID);
-        transferFrom(msg.sender, dismantler, dialID);
-        transferFrom(msg.sender, dismantler, itemID);
-        transferFrom(msg.sender, dismantler, hologramID);
-        combinations[compoKey] = Combination({
+        require(ownerOf(strapID) == custodyWallet, "Strap not in Project custody");
+        require(ownerOf(dialID) == custodyWallet, "Dial not in Project custody");
+        require(ownerOf(itemID) == custodyWallet, "Item not in Project custody");
+        require(ownerOf(hologramID) == custodyWallet, "Hologram not in Project custody");
+        _contractTransfer(dismantler, custodyWallet, tokenId);
+        transferFrom(custodyWallet, dismantler, strapID);
+        transferFrom(custodyWallet, dismantler, dialID);
+        transferFrom(custodyWallet, dismantler, itemID);
+        transferFrom(custodyWallet, dismantler, hologramID);
+        combinations[ComboKey] = Combination({
             owned: false,
             minted: true,
             reserved: false,
@@ -871,8 +901,8 @@ contract Xioverse is
 
     function dismantle(uint256 tokenId) public nonReentrant notInPanic {
         require(
-            isApprovedForAll(owner(), address(this)),
-            "Contract not approved to transfer owner's token"
+            isApprovedForAll(custodyWallet, address(this)),
+            "Contract not approved to transfer project's token"
         );
         require(tokenId < _nextTokenId, "Invalid token");
         require(ownerOf(tokenId) == msg.sender, "not the owner");
@@ -880,32 +910,29 @@ contract Xioverse is
         bool isADnaValid = stringUtils.isDnaValid(dnaResult);
         require(isADnaValid, "This is a not a valid DNA");
         (
-            string memory compoKey,
+            string memory ComboKey,
             string memory strap,
             string memory dial,
             string memory item,
             string memory hologram
         ) = stringUtils.processString(dnaResult);
-        require(combinations[compoKey].owned == true, "Combination not owned");
+        require(combinations[ComboKey].owned == true, "Combination not owned");
         uint256 strapID = combinationsId[strap];
         uint256 dialID = combinationsId[dial];
         uint256 itemID = combinationsId[item];
         uint256 hologramID = combinationsId[hologram];
-        require(ownerOf(strapID) == address(owner()), "not owned");
-        require(ownerOf(dialID) == address(owner()), "not owned");
-        require(ownerOf(itemID) == address(owner()), "not owned");
-        require(ownerOf(hologramID) == address(owner()), "not owned");
+        require(ownerOf(strapID) == custodyWallet, "Strap not in Project custody");
+        require(ownerOf(dialID) == custodyWallet, "Dial not in Project custody");
+        require(ownerOf(itemID) == custodyWallet, "Item not in Project custody");
+        require(ownerOf(hologramID) == custodyWallet, "Hologram not in Project custody");
 
-        transferFrom(msg.sender, address(owner()), tokenId);
-        IERC721(address(this)).safeTransferFrom(owner(), msg.sender, strapID);
-        IERC721(address(this)).safeTransferFrom(owner(), msg.sender, dialID);
-        IERC721(address(this)).safeTransferFrom(owner(), msg.sender, itemID);
-        IERC721(address(this)).safeTransferFrom(
-            owner(),
-            msg.sender,
-            hologramID
-        );
-        combinations[compoKey] = Combination({
+        transferFrom(msg.sender, custodyWallet, tokenId);
+        _contractTransfer(custodyWallet, msg.sender, strapID);
+        _contractTransfer(custodyWallet, msg.sender, dialID);
+        _contractTransfer(custodyWallet, msg.sender, itemID);
+        _contractTransfer(custodyWallet, msg.sender, hologramID);
+        
+        combinations[ComboKey] = Combination({
             owned: false,
             minted: true,
             reserved: false,
@@ -954,36 +981,48 @@ contract Xioverse is
             "Trait type mismatch"
         );
         xioToken.transferFrom(msg.sender, address(owner()), upgradeFee);
-        transferFrom(msg.sender, address(owner()), traitTokenId);
+        transferFrom(msg.sender, custodyWallet, traitTokenId);
         uint256 newTraitToken = _nextTokenId++;
         _safeMint(msg.sender, newTraitToken);
         idCombinations[newTraitToken] = newTraitCode;
         combinationsId[newTraitCode] = newTraitToken;
         incrementMinted(oldTraitCode);
-        IERC721(address(this)).safeTransferFrom(
-            address(owner()),
-            garbageCollector,
-            traitTokenId
-        );
+        _contractTransfer(custodyWallet, garbageCollector,traitTokenId)
+        ;
     }
 
     function upgradeTraitServer(
         uint256 traitTokenId,
         address upgrader
-    ) public onlyOwner {
-        require(isApprovedForAll(upgrader, address(owner())), "Not approved");
+    ) public nonReentrant onlyRole(CustodyWallet_Role) {
+        require(isApprovedForAll(upgrader, address(this)), "User has not given approval");
         string memory oldTraitCode = idCombinations[traitTokenId];
         address garbageCollector = address(0);
+        uint256 upgradeFee = 0;
         (Level nextLevel, string memory newTraitCode) = getNextUpgradeableTrait(
             oldTraitCode
         );
-        if (nextLevel == Level.L1) {
+
+               if (nextLevel == Level.L1) {
+            upgradeFee = upgradeFeeL0L1;
             garbageCollector = resaleWallet;
-        } else {
+        } else if (nextLevel == Level.L2) {
+            upgradeFee = upgradeFeeL1L2;
+            garbageCollector = junkyardWallet;
+        } else if (nextLevel == Level.L3) {
+            upgradeFee = upgradeFeeL2L3;
             garbageCollector = junkyardWallet;
         }
+        require(
+            xioToken.balanceOf(upgrader) >= upgradeFee,
+            "Insufficient balance"
+        );
+        require(
+            xioToken.allowance(upgrader, address(this)) >= upgradeFee,
+            "Not allowed to spend"
+        );
         require(traitTokenId < _nextTokenId, "Invalid token");
-        require(ownerOf(traitTokenId) == upgrader, "not the owner");
+        require(ownerOf(traitTokenId) == upgrader, "User is not the owner of selected trait");
         require(
             (stringUtils.isStrapValid(oldTraitCode) ==
                 stringUtils.isStrapValid(newTraitCode)) &&
@@ -995,13 +1034,14 @@ contract Xioverse is
                     stringUtils.isHologramValid(newTraitCode)),
             "Trait type mismatch"
         );
-        transferFrom(upgrader, address(owner()), traitTokenId);
+        xioToken.transferFrom(upgrader, address(owner()), upgradeFee);
+        _contractTransfer(upgrader, custodyWallet, traitTokenId);
         uint256 newTraitToken = _nextTokenId++;
         _safeMint(upgrader, newTraitToken);
         idCombinations[newTraitToken] = newTraitCode;
         combinationsId[newTraitCode] = newTraitToken;
         incrementMinted(oldTraitCode);
-        transferFrom(address(owner()), garbageCollector, traitTokenId);
+        transferFrom(custodyWallet, garbageCollector, traitTokenId);
     }
 
     function upgradeWatch(
@@ -1009,11 +1049,11 @@ contract Xioverse is
         uint256 traitIndex
     ) public nonReentrant notInPanic {
         require(
-            isApprovedForAll(owner(), address(this)),
-            "Contract not approved"
+            isApprovedForAll(custodyWallet, address(this)),
+            "Contract not approved to transfer project's token"
         );
         require(watchTokenId < _nextTokenId, "Invalid token");
-        require(ownerOf(watchTokenId) == msg.sender, "Not the owner");
+        require(ownerOf(watchTokenId) == msg.sender, "User does not own the watch");
 
         string memory oldCombinationCode = idCombinations[watchTokenId];
 
@@ -1058,18 +1098,9 @@ contract Xioverse is
         address garbageCollector = (nextLevel == Level.L1)
             ? resaleWallet
             : junkyardWallet;
-        uint256 upgradeFee = _getUpgradeFee(nextLevel);
 
-        require(
-            xioToken.balanceOf(msg.sender) >= upgradeFee,
-            "Insufficient balance"
-        );
-        require(
-            xioToken.allowance(msg.sender, address(this)) >= upgradeFee,
-            "Not allowed to spend"
-        );
-
-        transferFrom(msg.sender, address(owner()), watchTokenId);
+        _chargeUpgrade(msg.sender, nextLevel);
+        transferFrom(msg.sender, custodyWallet, watchTokenId);
 
         if (combinations[newComboKey].minted) {
             _upgradeWithExistingCombo(
@@ -1081,8 +1112,8 @@ contract Xioverse is
                 newTraitCode,
                 newDna,
                 newComboKey,
-                garbageCollector,
-                upgradeFee
+                garbageCollector
+               
             );
         } else {
             _upgradeWithNewCombo(
@@ -1094,8 +1125,8 @@ contract Xioverse is
                 newTraitCode,
                 newDna,
                 newComboKey,
-                garbageCollector,
-                upgradeFee
+                garbageCollector
+               
             );
         }
     }
@@ -1104,10 +1135,10 @@ contract Xioverse is
         uint256 watchTokenId,
         uint256 traitIndex,
         address upgrader
-    ) public onlyOwner {
-        require(isApprovedForAll(upgrader, address(owner())), "Not approved");
+    ) public nonReentrant onlyRole(CustodyWallet_Role) {
+        require(isApprovedForAll(upgrader, address(this)), "Not approved");
         require(watchTokenId < _nextTokenId, "Invalid token");
-        require(ownerOf(watchTokenId) == upgrader, "Not the owner");
+        require(ownerOf(watchTokenId) == upgrader, "User is not the watch's owner");
 
         string memory oldCombinationCode = idCombinations[watchTokenId];
 
@@ -1154,10 +1185,13 @@ contract Xioverse is
         address garbageCollector = (nextLevel == Level.L1)
             ? resaleWallet
             : junkyardWallet;
-        transferFrom(upgrader, address(owner()), watchTokenId); //
+        
+        _chargeUpgrade(upgrader, nextLevel);
+            
+        _contractTransfer(upgrader, custodyWallet, watchTokenId); //
 
         uint256 oldTraitTokenId = combinationsId[oldTraitCode];
-        // int256 watchTokenIdInt = int256(watchTokenId);
+        
 
         if (combinations[newComboKey].minted) {
             _handleUpgradeMintedCombo(
@@ -1280,15 +1314,15 @@ contract Xioverse is
         uint256 oldTokenId, // Watch token ID
         string memory oldCombinationCode, // Watch With Numbers
         string memory oldComboKey, // Watch without numbers
-        string memory oldTrait, // Old trait code aabaaaa12
-        string memory newTrait, // New trait code aabaaff13
+        string memory oldTrait, // Old trait code 
+        string memory newTrait, // New trait code 
         string memory newDna, // New DNA code with numbers including new trait
         string memory newComboKey, // New DNA code (without) numbers including new trait
-        address garbageCollector, // Address to send old trait to
-        uint256 fee // Upgrade fee
+        address garbageCollector // Address to send old trait to
+
     ) internal {
         uint256 newTraitId = _nextTokenId++;
-        _safeMint(address(owner()), newTraitId);
+        _safeMint(custodyWallet, newTraitId);
         idCombinations[newTraitId] = newTrait;
         combinationsId[newTrait] = newTraitId;
         string memory oldDna = combinations[newComboKey].dna;
@@ -1297,8 +1331,8 @@ contract Xioverse is
         combinationsId[newDna] = comboTokenId;
         idCombinations[comboTokenId] = newDna;
 
-        IERC721(address(this)).safeTransferFrom(owner(), user, comboTokenId);
-        xioToken.transferFrom(user, address(owner()), fee);
+        _contractTransfer(custodyWallet, user, comboTokenId);
+
         incrementMinted(oldTrait);
 
         combinations[oldComboKey] = Combination(
@@ -1316,11 +1350,7 @@ contract Xioverse is
             int256(comboTokenId)
         );
 
-        IERC721(address(this)).safeTransferFrom(
-            owner(),
-            garbageCollector,
-            combinationsId[oldTrait]
-        );
+        _contractTransfer(custodyWallet, garbageCollector, combinationsId[oldTrait]);
     }
 
     function _upgradeWithNewCombo(
@@ -1332,18 +1362,17 @@ contract Xioverse is
         string memory newTrait,
         string memory newDna,
         string memory newComboKey,
-        address garbageCollector,
-        uint256 fee
+        address garbageCollector
+
     ) internal {
         uint256 newTraitId = _nextTokenId++;
         uint256 newDnaId = _nextTokenId++;
-        _safeMint(address(owner()), newTraitId);
+        _safeMint(custodyWallet, newTraitId);
         _safeMint(user, newDnaId);
         idCombinations[newTraitId] = newTrait;
         combinationsId[newTrait] = newTraitId;
         idCombinations[newDnaId] = newDna;
         combinationsId[newDna] = newDnaId;
-        xioToken.transferFrom(user, address(owner()), fee);
         incrementMinted(oldTrait);
 
         combinations[oldComboKey] = Combination(
@@ -1360,11 +1389,9 @@ contract Xioverse is
             newDna,
             int256(newDnaId)
         );
-        IERC721(address(this)).safeTransferFrom(
-            owner(),
-            garbageCollector,
-            combinationsId[oldTrait]
-        );
+
+        _contractTransfer(custodyWallet, garbageCollector, combinationsId[oldTrait]);
+        
     }
 
     function _handleUpgradeMintedCombo(
@@ -1378,7 +1405,7 @@ contract Xioverse is
         uint256 oldTraitTokenId
     ) internal {
         uint256 traitTokenID = _nextTokenId++;
-        _safeMint(address(owner()), traitTokenID);
+        _safeMint(custodyWallet, traitTokenID);
         idCombinations[traitTokenID] = newTraitCode;
         combinationsId[newTraitCode] = traitTokenID;
         string memory oldDna = combinations[newComboKey].dna;
@@ -1386,7 +1413,7 @@ contract Xioverse is
         delete combinationsId[oldDna];
         combinationsId[newDna] = comboTokenID;
         idCombinations[comboTokenID] = newDna;
-        transferFrom(address(owner()), upgrader, comboTokenID);
+        transferFrom(custodyWallet, upgrader, comboTokenID);
         incrementMinted(oldTraitCode);
         Combination storage oldCombo = combinations[oldComboKey];
         oldCombo.owned = false;
@@ -1398,7 +1425,7 @@ contract Xioverse is
             newDna,
             int256(comboTokenID)
         );
-        transferFrom(address(owner()), garbageCollector, oldTraitTokenId);
+        transferFrom(custodyWallet, garbageCollector, oldTraitTokenId);
     }
 
     function _handleUpgradeNewCombo(
@@ -1413,7 +1440,7 @@ contract Xioverse is
         uint256 newTraitId = _nextTokenId++;
         uint256 newDnaId = _nextTokenId++;
 
-        _safeMint(address(owner()), newTraitId);
+        _safeMint(custodyWallet, newTraitId);
         _safeMint(upgrader, newDnaId);
 
         idCombinations[newTraitId] = newTrait;
@@ -1434,13 +1461,24 @@ contract Xioverse is
             newDna,
             int256(newDnaId)
         );
-        IERC721(address(this)).safeTransferFrom(
-            owner(),
-            garbageCollector,
-            combinationsId[oldTrait]
-        );
+        _contractTransfer(custodyWallet, garbageCollector, combinationsId[oldTrait]);
+        
     }
 
+    function _chargeUpgrade(address payer, Level lvl) internal {
+        uint256 upgradeFee = _getUpgradeFee(lvl);
+        require(
+            xioToken.balanceOf(payer) >= upgradeFee,
+            "Insufficient balance"
+        );
+        require(
+            xioToken.allowance(payer, address(this)) >= upgradeFee,
+            "Not allowed to spend"
+        );
+        xioToken.transferFrom(payer, address(owner()), upgradeFee);
+        emit UpgradeCharged(payer, upgradeFee, uint8(lvl));
+
+    }
     function _setCombination(
         string memory key,
         bool owned,
@@ -1463,7 +1501,6 @@ contract Xioverse is
         address receiver,
         uint256 amount
     ) public onlyOwner nonReentrant {
-        require(amount >= 10e6, "Min 10 USDC");
         require(
             usdcToken.balanceOf(address(this)) >= amount,
             "Insufficient balance"
@@ -1499,22 +1536,35 @@ contract Xioverse is
         _unpause();
     }
 
-    function triggerPanicMode() public onlyOwner {
+    function enablePanicMode() public onlyOwner {
         panicMode = true;
         _pause();
     }
 
-    function resumeNormalMode() public onlyOwner {
+    function disablePanicMode() public onlyOwner {
         panicMode = false;
         _unpause();
     }
 
     // ---- ERC721 Overrides ----
-    function tokenURI(
-        uint256 tokenId
-    ) public view override(ERC721, ERC721URIStorage) returns (string memory) {
-        return super.tokenURI(tokenId);
-    }
+function tokenURI(uint256 tokenId)
+    public
+    view
+    override(ERC721, ERC721URIStorage)
+    returns (string memory)
+{
+    _requireOwned(tokenId);
+
+    string memory dna = idCombinations[tokenId];
+    require(bytes(dna).length > 0, "No DNA assigned to this token");
+
+    // Decide: watch DNA or trait DNA
+    string memory slug = stringUtils.isDnaValid(dna)
+        ? stringUtils.extractNoNumbers(dna)  // watch
+        : stringUtils.normalizeTrait(dna);   // trait
+
+    return string.concat(_baseURI(), slug, _uriExtension);
+}
 
     function _baseURI() internal view override returns (string memory) {
         // Override _baseURI to return the custom base URI
@@ -1561,10 +1611,34 @@ contract Xioverse is
     function getPrivateCombination(
         uint256 index
     ) private view returns (string memory, string memory) {
-        require(index < 50000, "Index out of bounds");
+        require(index < 10, "Index out of bounds");
         PrivateCombination memory privatecombination = privateCombinations[
             index
         ];
         return (privatecombination.dna, privatecombination.gift);
     }
+
+    function getWatchParts(uint256 watchTokenId)
+    external
+    view
+    returns (
+        string memory strap, uint256 strapId,
+        string memory dial,  uint256 dialId,
+        string memory item,  uint256 itemId,
+        string memory hologram, uint256 hologramId
+    )
+{
+    string memory dna = idCombinations[watchTokenId];
+    require(bytes(dna).length > 0, "No DNA");
+    require(stringUtils.isDnaValid(dna), "Invalid DNA");
+
+    ( , strap, dial, item, hologram) = stringUtils.processString(dna);
+
+    strapId    = combinationsId[strap];
+    dialId     = combinationsId[dial];
+    itemId     = combinationsId[item];
+    hologramId = combinationsId[hologram];
+
+}
+
 }
