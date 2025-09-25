@@ -2,11 +2,11 @@
 pragma solidity ^0.8.22;
 
 library stringUtils {
-    function isNumber(bytes1 b) private pure returns (bool) {
+    function isNumber(bytes1 b) internal pure returns (bool) {
         return b >= 0x30 && b <= 0x39;
     }
 
-    function isLetter(bytes1 b) private pure returns (bool) {
+    function isLetter(bytes1 b) internal pure returns (bool) {
         return (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A);
     }
 
@@ -14,7 +14,7 @@ library stringUtils {
         string memory str,
         uint256 startIndex,
         uint256 endIndex
-    ) private pure returns (string memory) {
+    ) internal pure returns (string memory) {
         bytes memory strBytes = bytes(str);
         bytes memory result = new bytes(endIndex - startIndex);
         for (uint256 i = 0; i < result.length; i++) {
@@ -52,7 +52,7 @@ library stringUtils {
     }
 
     function extractNoNumbers(string memory input)
-        private
+        internal
         pure
         returns (string memory)
     {
@@ -86,7 +86,11 @@ library stringUtils {
         return (noNumbers, part1, part2, part3, part4);
     }
 
-    function uintToString(uint256 number) private pure returns (string memory) {
+    function uintToString(uint256 number)
+        internal
+        pure
+        returns (string memory)
+    {
         if (number == 0) return "0";
         uint256 digits = 0;
         uint256 temp = number;
@@ -107,21 +111,20 @@ library stringUtils {
         pure
         returns (string memory)
     {
-        require(number <= 99999999, "Number must be 8 digits or less");
-        string memory numberStr = uintToString(number);
-        uint256 leadingZeros = 8 - bytes(numberStr).length;
-        bytes memory result = new bytes(11);
+        require(number <= 89999, "Number must be 8 digits or less");
+        uint256 new_NUM = number + 10000;
+        string memory numberStr = uintToString(new_NUM);
+        bytes memory result = new bytes(8);
         result[0] = "x";
         result[1] = "i";
         result[2] = "o";
-        for (uint256 i = 0; i < leadingZeros; i++) result[3 + i] = "0";
         for (uint256 i = 0; i < bytes(numberStr).length; i++)
-            result[3 + leadingZeros + i] = bytes(numberStr)[i];
+            result[3 + i] = bytes(numberStr)[i];
         return string(result);
     }
 
     function isTraitValid(string memory trait, bytes2 prefix)
-        private
+        internal
         pure
         returns (bool)
     {
@@ -146,11 +149,7 @@ library stringUtils {
         return isTraitValid(item, "ac");
     }
 
-    function isHologramValid(string memory hologram)
-        internal
-        pure
-        returns (bool)
-    {
+    function isHologramValid(string memory hologram) internal pure returns (bool) {
         return isTraitValid(hologram, "ad");
     }
 
@@ -178,7 +177,7 @@ library stringUtils {
         string memory str,
         uint256 start,
         uint256 length
-    ) private pure returns (string memory) {
+    ) internal pure returns (string memory) {
         bytes memory strBytes = bytes(str);
         require(start + length <= strBytes.length, "Slice out of bounds");
         bytes memory result = new bytes(length);
