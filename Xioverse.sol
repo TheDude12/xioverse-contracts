@@ -1611,7 +1611,7 @@ function tokenURI(uint256 tokenId)
     function getPrivateCombination(
         uint256 index
     ) private view returns (string memory, string memory) {
-        require(index < 10, "Index out of bounds");
+        require(index < 50000, "Index out of bounds");
         PrivateCombination memory privatecombination = privateCombinations[
             index
         ];
@@ -1642,3 +1642,4 @@ function tokenURI(uint256 tokenId)
 }
 
 }
+
